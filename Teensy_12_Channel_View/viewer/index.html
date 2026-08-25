@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teensy 4.1 &middot; 12-Channel Logic Analyzer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <h1>Teensy 4.1<span>12-Channel Logic Analyzer</span></h1>
+    <div id="connBox">
+      <button id="btnConnect" class="primary">&#128268; Connect</button>
+      <span id="connStatus" class="badge off">Not connected</span>
+      <span id="devInfo" class="devinfo"></span>
+      <button id="btnDemo">Demo</button>
+      <button id="btnStart" title="Connect the Teensy first, then start the capture">&#9654; Start</button>
+      <button id="btnStop" disabled>&#9632; Stop</button>
+      <button id="btnReset" title="Clear the graph and restart the capture (time base back to 0)">&#8635; Reset</button>
+    </div>
+  </header>
+
+  <section class="card" id="pinPanel">
+    <div class="cardtitle">
+      Channel &rarr; pin mapping
+      <button id="btnApply">Apply to Teensy</button>
+      <label class="chk"><input type="checkbox" id="chkAutoApply" checked> auto-apply</label>
+      <span class="presets">Presets:
+        <button data-preset="0-11">0&ndash;11</button>
+        <button data-preset="12-23">12&ndash;23</button>
+        <button data-preset="24-35">24&ndash;35</button>
+        <button data-preset="30-41">30&ndash;41</button>
+        <button data-preset="spread">spread</button>
+      </span>
+    </div>
+    <div id="pinList"></div>
+    <div id="pinErr"></div>
+    <div class="warn">&#9888; Teensy 4.1 inputs are <b>3.3&nbsp;V logic, not 5&nbsp;V tolerant</b>. Always share ground with the device under test.</div>
+  </section>
+
+  <section class="card" id="outPanel">
+    <div class="cardtitle">
+      Output drivers &mdash; pulse HIGH on demand
+      <label class="chk">pulse width <input type="number" id="pulseMs" min="1" max="3000" step="10" value="100"> ms</label>
+      <button id="btnApplyOuts">Apply</button>
+      <label class="chk"><input type="checkbox" id="chkAutoApplyOuts" checked> auto-apply</label>
+    </div>
+    <div id="outList"></div>
+    <div id="outErr"></div>
+    <div class="warn">Outputs are idle-LOW 3.3&nbsp;V signals. Keep them off pins you also sample as channels.</div>
+  </section>
+
+  <section class="card" id="viewPanel">
+    <div class="toolbar">
+      <label>Window <select id="winSel">
+        <option value="10">10 ms</option>
+        <option value="25">25 ms</option>
+        <option value="50">50 ms</option>
+        <option value="100" selected>100 ms</option>
+        <option value="200">200 ms</option>
+        <option value="500">500 ms</option>
+        <option value="1000">1 s</option>
+      </select></label>
+      <label>View span <select id="spanSel">
+        <option value="0.00001">10 &micro;s</option>
+        <option value="0.0001">100 &micro;s</option>
+        <option value="0.001">1 ms</option>
+        <option value="0.01">10 ms</option>
+        <option value="0.05">50 ms</option>
+        <option value="0.1">100 ms</option>
+        <option value="0.5" selected>500 ms</option>
+        <option value="2">2 s</option>
+        <option value="10">10 s</option>
+        <option value="60">60 s</option>
+      </select></label>
+      <label class="chk"><input type="checkbox" id="chkFollow" checked> Follow</label>
+      <button id="btnExport" title="Download the visible window as CSV">&#8623; CSV</button>
+      <span id="stats" class="stats"></span>
+    </div>
+    <div id="waveWrap">
+      <canvas id="wave"></canvas>
+      <div id="cursorRead" class="cursorread"></div>
+    </div>
+    <div class="warn" style="margin-top:6px;">Zoom: scroll wheel &middot; Pan: drag &middot; Cursor A: click &middot; Cursor B: shift+click &middot; Clear cursors / zoom to a pulse: double-click a lane &middot; Reset graph: &#8635; button or R</div>
+  </section>
+
+  <section class="card" id="measPanel">
+    <div class="cardtitle">Pulse measurements<span class="hint">last completed pulse &middot; period = rise-to-rise &middot; click a pulse width to zoom to it</span></div>
+    <table id="measTable">
+      <thead>
+        <tr><th>CH</th><th>Pin</th><th>Level</th><th>Pulse width</th><th>Period</th><th>Frequency</th><th>Pulses</th></tr>
+      </thead>
+      <tbody id="measBody"></tbody>
+    </table>
+  </section>
+
+  <footer id="log">Open <b>viewer/index.html</b> over http://localhost (e.g. <code>python3 -m http.server 8000</code> inside the viewer folder), then click Connect and pick your Teensy. Use Chrome or Edge.</footer>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
