@@ -3,12 +3,14 @@
 // pulse measurement, and gap handling.
 'use strict';
 const assert = require('assert');
-const { CORE, handleLine, handleMeta, fmtTime, fmtFreq } = require('../viewer/app.js');
+const { CORE, handleLine, handleMeta, fmtTime, fmtFreq, unwrap } = require('../viewer/app.js');
 
 function reset() {
   CORE.fcpu = 600000000;
   CORE.evT = []; CORE.evS = []; CORE.gaps = [];
   CORE.lastRaw = null; CORE.wrapAcc = 0;
+  CORE.accT = []; CORE.accX = []; CORE.accY = []; CORE.accZ = [];
+  CORE.accOn = false; CORE.accOdr = 0; CORE.accErr = false;
   CORE.meas = [];
   require('../viewer/app.js'); // ensure initMeas ran; re-run below
   // re-init measurements
@@ -209,6 +211,85 @@ check('trimData bounds memory', () => {
   assert.ok(before > 1500000, 'generated plenty of data: ' + before);
   assert.ok(CORE.evT.length <= 1500000, 'event cap respected: ' + CORE.evT.length);
   assert.ok(CORE.evT[CORE.evT.length - 1] - CORE.evT[0] <= 601, 'time window capped');
+});
+
+// ------------------------------------------------------ accelerometer: A lines
+reset();
+check('accelerometer A-line parsing', () => {
+  const WRAP = 4294967296;
+  handleLine('#FCPU 600000000');
+  handleLine('A 100 1000 2000 -500');
+  handleLine('A 1600 1050 1900 -450');   // 2.5 us later
+  assert.strictEqual(CORE.accT.length, 2);
+  assert.strictEqual(CORE.accX[0], 1000);
+  assert.strictEqual(CORE.accY[0], 2000);
+  assert.strictEqual(CORE.accZ[0], -500);
+  assert.ok(Math.abs((CORE.accT[1] - CORE.accT[0]) - 2.5e-6) < 1e-12,
+    'accel times: ' + CORE.accT[0] + ' / ' + CORE.accT[1]);
+  // accel shares the unwrap chain with the S/E stream: an edge just before
+  // the 32-bit wrap, then an A line with a small raw timestamp, must come out
+  // after the wrap instead of plotting ~7 s in the past.
+  handleLine('E ' + (WRAP - 500) + ' 001');
+  handleLine('A 100 7 8 9');
+  assert.ok(Math.abs(CORE.accT[2] - (WRAP + 100) / 600000000) < 1e-6,
+    'accel unwraps with the shared counter: ' + CORE.accT[2]);
+});
+
+reset();
+check('accelerometer metadata', () => {
+  handleLine('#ACC 1');
+  handleLine('#ACCODR 1000');
+  handleLine('#ACCRANGE 10');
+  assert.strictEqual(CORE.accOn, true);
+  assert.strictEqual(CORE.accOdr, 1000);
+  assert.strictEqual(CORE.accRange, 10);
+  handleLine('#ACC 0');
+  assert.strictEqual(CORE.accOn, false);
+  handleLine('#ACCERR no chip on SPI');
+  assert.strictEqual(CORE.accErr, true);
+});
+
+reset();
+check('tolerant unwrap: small backwards steps do not wrap, real wraps do', () => {
+  const WRAP = 4294967296;
+  assert.strictEqual(unwrap(1000), 1000);
+  assert.strictEqual(unwrap(999), 999);            // small step back: no wrap
+  assert.strictEqual(unwrap(1001), 1001);
+  assert.strictEqual(unwrap(WRAP - 1000), WRAP - 1000);
+  assert.strictEqual(unwrap(10), WRAP + 10);       // genuine wrap
+  assert.strictEqual(unwrap(11), WRAP + 11);
+});
+
+reset();
+check('A lines tolerate gaps and junk around them', () => {
+  handleLine('#FCPU 600000000');
+  handleLine('S 0 000');
+  handleLine('A 100 1 2 3');
+  handleLine('G 5000 6000');
+  handleLine('A 6500 4 5 6');
+  handleLine('A notanumber 1 2 3');
+  handleLine('A 10 20 30');                        // incomplete
+  assert.strictEqual(CORE.accT.length, 2);
+  assert.strictEqual(CORE.gaps.length, 1);
+});
+
+reset();
+check('trimData bounds accelerometer arrays', () => {
+  const { trimData } = require('../viewer/app.js');
+  handleLine('#FCPU 600000000');
+  const STEP = 60000000;               // 0.1 s per sample at 600 MHz
+  for (let i = 0; i < 6100; i++) {
+    handleLine('A ' + (i * STEP) + ' ' + i + ' ' + (i + 1) + ' ' + (i + 2));
+  }
+  assert.strictEqual(CORE.accT.length, 6100);
+  trimData();
+  assert.ok(CORE.accT.length < 6100, 'accel trimmed: ' + CORE.accT.length);
+  assert.ok(CORE.accT[CORE.accT.length - 1] - CORE.accT[0] <= 601,
+    'accel time window capped');
+  // arrays stay in sync
+  assert.strictEqual(CORE.accX.length, CORE.accT.length);
+  assert.strictEqual(CORE.accY.length, CORE.accT.length);
+  assert.strictEqual(CORE.accZ.length, CORE.accT.length);
 });
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : '\n' + failures + ' TEST(S) FAILED');

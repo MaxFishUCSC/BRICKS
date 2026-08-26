@@ -126,6 +126,23 @@ button.pulsebtn.pulsing {
   padding: 3px 4px; font-size: 12px;
 }
 
+/* ---------- accelerometer ---------- */
+#btnAccel { font-weight: 700; letter-spacing: .3px; border-radius: 20px; padding: 3px 16px; }
+#btnAccel.acc-on {
+  background: #1b3a2a; color: #81c784;
+  border-color: #2e7d32; box-shadow: 0 0 0 2px rgba(46,125,50,.25);
+}
+#btnAccel.acc-err {
+  background: #3a1b1b; color: #ef9a9a;
+  border-color: #c62828; box-shadow: 0 0 0 2px rgba(198,40,40,.3);
+}
+#accOdrSel {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 4px; font-size: 12px;
+}
+.accstatus { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.accstatus .clash { color: var(--warn); }
+
 /* ---------- view toolbar + canvas ---------- */
 .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
 .toolbar label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }

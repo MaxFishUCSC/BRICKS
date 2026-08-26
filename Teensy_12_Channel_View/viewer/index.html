@@ -52,6 +52,21 @@
     <div class="warn">Outputs are idle-LOW 3.3&nbsp;V signals. Keep them off pins you also sample as channels.</div>
   </section>
 
+  <section class="card" id="accPanel">
+    <div class="cardtitle">
+      Accelerometer &mdash; ADXL355/359 on SPI
+      <button id="btnAccel">Accel: OFF</button>
+      <label class="chk">ODR <select id="accOdrSel">
+        <option value="500">500 Hz</option>
+        <option value="1000" selected>1000 Hz</option>
+        <option value="2000">2000 Hz</option>
+        <option value="4000">4000 Hz</option>
+      </select></label>
+    </div>
+    <div id="accStatus" class="accstatus"></div>
+    <div class="warn">X/Y/Z stream in mg on the same time base as the logic lanes. Wiring: <b>CS = pin 35</b>, SCK = 13, MOSI = 11, MISO = 12 (3.3&nbsp;V, shared ground). Keep those pins out of the channel/output lists while accel is on.</div>
+  </section>
+
   <section class="card" id="viewPanel">
     <div class="toolbar">
       <label>Window <select id="winSel">

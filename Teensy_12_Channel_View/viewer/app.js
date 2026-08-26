@@ -57,7 +57,13 @@ const CORE = {
   overflow: false,
   lastRate: 0, rateAt: 0,
   evCountAt: 0, evCountT: 0, eventsPerSec: 0,
-  meas: []          // per-channel measurement state (see initMeas)
+  meas: [],         // per-channel measurement state (see initMeas)
+  accT: [],         // accelerometer sample times in seconds
+  accX: [], accY: [], accZ: [],   // accelerometer values in mg
+  accOn: false,     // streaming enabled (from #ACC)
+  accOdr: 0,        // output data rate in Hz (from #ACCODR)
+  accRange: 10,     // full-scale range in g (from #ACCRANGE)
+  accErr: false     // last probe of the sensor failed (from #ACCERR)
 };
 
 function initMeas() {
@@ -86,9 +92,14 @@ function lowerBound(arr, v) {
   return lo;
 }
 
-/* Convert a raw 32-bit cycle timestamp into an unwrapped cycle count. */
+/* Convert a raw 32-bit cycle timestamp into an unwrapped cycle count.
+ * Wrap detection is tolerant: the accelerometer stream can arrive with small
+ * backwards steps (back-dated FIFO samples at window boundaries), so only a
+ * drop of more than 2^31 cycles (~3.6 s) counts as a genuine 32-bit wrap. */
 function unwrap(raw) {
-  if (CORE.lastRaw !== null && raw < CORE.lastRaw) CORE.wrapAcc += CYCLE_WRAP;
+  if (CORE.lastRaw !== null && (CORE.lastRaw - raw) > CYCLE_WRAP / 2) {
+    CORE.wrapAcc += CYCLE_WRAP;
+  }
   CORE.lastRaw = raw;
   return CORE.wrapAcc + raw;
 }
@@ -164,6 +175,20 @@ function trimData() {
     const gmin = CORE.evT[0];
     if (CORE.gaps.length) CORE.gaps = CORE.gaps.filter(g => g.t1 >= gmin);
   }
+  // Accelerometer arrays: same cap, same time window.
+  if (CORE.accT.length > MAX_N) {
+    const cut = CORE.accT.length - MAX_N;
+    CORE.accT.splice(0, cut); CORE.accX.splice(0, cut);
+    CORE.accY.splice(0, cut); CORE.accZ.splice(0, cut);
+  }
+  if (CORE.accT.length && CORE.accT[CORE.accT.length - 1] - CORE.accT[0] > MAX_T) {
+    const t0 = CORE.accT[CORE.accT.length - 1] - MAX_T;
+    const i = lowerBound(CORE.accT, t0);
+    if (i > 0) {
+      CORE.accT.splice(0, i); CORE.accX.splice(0, i);
+      CORE.accY.splice(0, i); CORE.accZ.splice(0, i);
+    }
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -221,6 +246,16 @@ function handleLine(line) {
       CORE.gaps.push({ t0: t0 / CORE.fcpu, t1: t1 / CORE.fcpu });
       invalidateMeas();
     }
+  } else if (kind === 'A') {
+    const p = rest.split(/\s+/);
+    if (p.length < 4) return;
+    const rawT = parseInt(p[0], 10);
+    const x = parseFloat(p[1]), y = parseFloat(p[2]), z = parseFloat(p[3]);
+    if (!isFinite(rawT) || !isFinite(x) || !isFinite(y) || !isFinite(z)) return;
+    if (CORE.fcpu > 0) {
+      CORE.accT.push(unwrap(rawT) / CORE.fcpu);
+      CORE.accX.push(x); CORE.accY.push(y); CORE.accZ.push(z);
+    }
   }
 }
 
@@ -243,6 +278,11 @@ function handleMeta(line) {
     case '#STOP':    break;
     case '#RATE':    CORE.lastRate = parseInt(p[1], 10) || 0; CORE.rateAt = Date.now(); break;
     case '#OVF':     CORE.overflow = true; break;
+    case '#ACC':     CORE.accOn = p[1] === '1'; break;
+    case '#ACCODR':  CORE.accOdr = parseInt(p[1], 10) || 0; break;
+    case '#ACCRANGE': CORE.accRange = parseInt(p[1], 10) || 10; break;
+    case '#ACCOVF':  CORE.accErr = false; break;
+    case '#ACCERR':  CORE.accErr = true; break;
     default:         break;
   }
 }
@@ -295,13 +335,20 @@ const els = {
   pulseMs: $('pulseMs'), outList: $('outList'), outErr: $('outErr'),
   winSel: $('winSel'), spanSel: $('spanSel'), chkFollow: $('chkFollow'),
   btnExport: $('btnExport'), stats: $('stats'), wave: $('wave'), waveWrap: $('waveWrap'),
-  cursorRead: $('cursorRead'), measBody: $('measBody'), log: $('log')
+  cursorRead: $('cursorRead'), measBody: $('measBody'), log: $('log'),
+  btnAccel: $('btnAccel'), accOdrSel: $('accOdrSel'), accStatus: $('accStatus')
 };
+
+/* Accelerometer lane styling (AX / AY / AZ) */
+const ACC_LANE_COLORS = ['#4fc3f7', '#aed581', '#ffd740'];
+const ACC_PINS = [11, 12, 13, 35];   // SPI SCK/MOSI/MISO + accel CS
 
 const VIEW = { span: 0.5, right: 0.001, follow: true, cursorA: null, cursorB: null, hoverT: null };
 const UI = { connected: false, demo: false, syncing: false, dirty: true,
              lastStats: 0, lastTrim: 0, lastNoDataWarn: 0, infoSentAt: 0,
-             lastConnWarn: 0, dragging: null, demoStart: 0, demoHandle: null };
+             lastConnWarn: 0, dragging: null, demoStart: 0, demoHandle: null,
+             demoAccelT: 0, lastAccelOnUI: false, accelPendingAt: 0,
+             accelStallWarnAt: 0 };
 
 /* ---------- log ---------- */
 function log(msg, cls) {
@@ -429,6 +476,13 @@ function onDataLine(line) {
     case '#PULSEW': FW_OUTS.pw = parseInt(p[1], 10) || 100; break;
     case '#PULSE': log('Teensy: ' + p[1] + ' pulsed'); break;
     case '#WIN':   if (!UI.syncing) els.winSel.value = String(CORE.winMs); break;
+    case '#ACC':   CORE.accOn = p[1] === '1'; UI.accelPendingAt = 0; updateAccelUI(); break;
+    case '#ACCODR': CORE.accOdr = parseInt(p[1], 10) || 0; updateAccelUI(); break;
+    case '#ACCRANGE': CORE.accRange = parseInt(p[1], 10) || 10; break;
+    case '#ACCOVF': setStatus('\u26A0 accel samples dropped (USB too slow)', 'warn');
+                    log('Accel staging overflow: samples dropped. Lower the ODR or shorten the window.', 'warn'); break;
+    case '#ACCERR': CORE.accErr = true; UI.accelPendingAt = 0; updateAccelUI();
+                    log('teensy: ' + p.slice(1).join(' '), 'err'); break;
     case '#ERR':   log('teensy: ' + p.slice(1).join(' '), 'err'); break;
     case '#OVF':   setStatus('\u26A0 ring overflow \u2014 signal too fast', 'warn'); log('Ring buffer overflow: events dropped.', 'warn'); break;
   }
@@ -454,6 +508,7 @@ function doStop() {
 
 function startCaptureLocal(msg) {
   CORE.evT = []; CORE.evS = []; CORE.gaps = [];
+  CORE.accT = []; CORE.accX = []; CORE.accY = []; CORE.accZ = [];
   CORE.lastRaw = null; CORE.wrapAcc = 0;
   CORE.wallStart = performance.now();
   CORE.capturing = true; CORE.overflow = false;
@@ -484,6 +539,7 @@ function stopCaptureLocal() {
  * keeps capturing, if stopped it stays stopped.  Use Start/Stop for that. */
 function doReset() {
   CORE.evT = []; CORE.evS = []; CORE.gaps = [];
+  CORE.accT = []; CORE.accX = []; CORE.accY = []; CORE.accZ = [];
   CORE.lastRaw = null; CORE.wrapAcc = 0;
   CORE.overflow = false;
   CORE.lastRate = 0; CORE.rateAt = 0;
@@ -498,6 +554,7 @@ function doReset() {
 
   if (UI.demo) {
     UI.demoStart = performance.now();
+    UI.demoAccelT = 0;
     handleLine('S 0 000');
     log('\u21BB Reset: demo graph cleared and restarted');
     return;
@@ -807,6 +864,61 @@ function maybeAutoApplyOuts() {
   if (differs) { syncOutUI(); sendOutsConfig(); }
 }
 
+/* ---------- accelerometer (ADXL355/359) ---------- */
+function toggleAccel() {
+  if (UI.demo) {
+    CORE.accOn = !CORE.accOn;
+    log('Demo accel ' + (CORE.accOn ? 'enabled' : 'disabled'));
+    updateAccelUI();
+    return;
+  }
+  if (!UI.connected) {
+    setStatus('Connect the Teensy first', 'warn');
+    return;
+  }
+  const next = CORE.accOn ? 'OFF' : 'ON';
+  sendCmd('ACC ' + next);
+  log('\u2192 ACC ' + next);
+  // Expect a #ACC reply; if none arrives shortly, the Teensy is probably
+  // still running the old firmware (which does not know this command).
+  UI.accelPendingAt = (next === 'ON') ? performance.now() : 0;
+}
+
+/* Reflect the accelerometer state (CORE.accOn/accOdr/accErr) in the UI and
+ * keep the canvas sized to the lane count.  Cheap; call whenever it might
+ * have changed. */
+function updateAccelUI() {
+  const wasOn = UI.lastAccelOnUI;
+  UI.lastAccelOnUI = CORE.accOn;
+  if (wasOn !== CORE.accOn) resize();       // 3 extra lanes appear/disappear
+  els.btnAccel.textContent = 'Accel: ' + (CORE.accOn ? 'ON' : 'OFF');
+  els.btnAccel.classList.toggle('acc-on', CORE.accOn);
+  els.btnAccel.classList.toggle('acc-err', !UI.demo && CORE.accErr && !CORE.accOn);
+  if (CORE.accOdr && !UI.syncing) els.accOdrSel.value = String(CORE.accOdr);
+  let s = '';
+  if (UI.demo) {
+    s = 'demo: synthetic 8 Hz vibration \u00B7 ' + (CORE.accOdr || 1000) + ' Hz';
+  } else if (!UI.connected) {
+    s = 'Connect the Teensy to manage the accelerometer';
+  } else if (CORE.accOn) {
+    s = (CORE.accOdr || '?') + ' Hz \u00B7 \u00B1' + (CORE.accRange || 10) + ' g \u00B7 32-sample FIFO drained continuously (tiny shaded gaps = SPI pauses)';
+  } else if (CORE.accErr) {
+    s = 'not detected \u2014 check wiring: CS=35, SCK=13, MOSI=11, MISO=12, 3.3 V';
+  } else {
+    s = 'off \u2014 click "Accel: ON" to enable';
+  }
+  if (CORE.accOn) {
+    const clash = [];
+    CORE.pins.forEach((p, i) => { if (ACC_PINS.includes(p)) clash.push('CH' + (i + 1) + '=P' + p); });
+    OUT_NAMES.forEach(n => {
+      const p = CORE.outs[n.toLowerCase()];
+      if (p >= 0 && ACC_PINS.includes(p)) clash.push(n + '=P' + p);
+    });
+    if (clash.length) s += '  \u26A0 ' + clash.join(', ') + ' is on the SPI pins';
+  }
+  els.accStatus.textContent = s;
+}
+
 /* ---------- demo mode (no hardware needed) ---------- */
 function toggleDemo() {
   UI.demo = !UI.demo;
@@ -814,24 +926,40 @@ function toggleDemo() {
   if (UI.demo) {
     if (UI.connected) disconnect();
     CORE.fcpu = 600000000;
+    CORE.accOn = true;               // demo shows the accelerometer lanes too
+    CORE.accOdr = 1000;
+    CORE.accErr = false;
     updateDevInfo();
-    startCaptureLocal('Demo mode: synthetic 100 Hz, 1 \u00B5s pulses');
+    startCaptureLocal('Demo mode: synthetic 100 Hz, 1 \u00B5s pulses + vibration');
     handleLine('S 0 000');
     UI.demoStart = performance.now();
+    UI.demoAccelT = 0;
     UI.demoHandle = setInterval(emitDemoTick, 10);
     els.btnStart.disabled = true; els.btnStop.disabled = true;
+    updateAccelUI();
   } else {
     if (UI.demoHandle) clearInterval(UI.demoHandle);
     UI.demoHandle = null;
     CORE.capturing = false;
     els.btnStart.disabled = true; els.btnStop.disabled = true;
     setStatus('Demo stopped', 'off');
+    updateAccelUI();
   }
 }
 
 function emitDemoTick() {
   const tEnd = (performance.now() - UI.demoStart) / 1000;
   demoEvent(Math.max(0, tEnd - 0.010), tEnd);
+  // Synthetic vibration: an 8 Hz wobble on all axes around ~1 g on Z, so the
+  // accel lanes show a slow oscillation correlated with the digital pulses.
+  const STEP = 1 / (CORE.accOdr || 1000);
+  for (let t = UI.demoAccelT + STEP; t <= tEnd; t += STEP) {
+    const x = Math.round(30 * Math.sin(2 * Math.PI * 8 * t + 2));
+    const y = Math.round(250 * Math.sin(2 * Math.PI * 8 * t));
+    const z = Math.round(1000 + 40 * Math.sin(2 * Math.PI * 8 * t + 1));
+    handleLine('A ' + Math.round(t * CORE.fcpu) + ' ' + x + ' ' + y + ' ' + z);
+  }
+  UI.demoAccelT = tEnd;
   UI.dirty = true;
 }
 
@@ -844,7 +972,8 @@ let cw = 0, chH = 0, dpr = 1;
 function resize() {
   dpr = window.devicePixelRatio || 1;
   cw = els.waveWrap.clientWidth - 2;
-  chH = AXIS_H + NCH * LANE_H + 6;
+  const nLanes = NCH + (CORE.accOn ? 3 : 0);   // 3 accelerometer lanes when on
+  chH = AXIS_H + nLanes * LANE_H + 6;
   cv.style.width = cw + 'px';
   cv.style.height = chH + 'px';
   cv.width = Math.max(1, Math.round(cw * dpr));
@@ -876,13 +1005,15 @@ function draw(now) {
   drawTimeAxis(x0, x1, X);
   drawGaps(x0, x1, X);
   drawWaves(x0, x1, X);
+  if (CORE.accOn) drawAccelWaves(x0, x1, X);
   drawGutter();
   drawCursors(x0, x1, X);
   UI.dirty = false;
 }
 
 function drawLanes() {
-  for (let i = 0; i < NCH; i++) {
+  const nLanes = NCH + (CORE.accOn ? 3 : 0);
+  for (let i = 0; i < nLanes; i++) {
     const y = AXIS_H + i * LANE_H;
     if (i % 2 === 0) {
       ctx.fillStyle = 'rgba(255,255,255,0.025)';
@@ -897,6 +1028,14 @@ function drawLanes() {
   }
   ctx.strokeStyle = '#222b36';
   ctx.beginPath(); ctx.moveTo(0, AXIS_H); ctx.lineTo(cw, AXIS_H); ctx.stroke();
+  if (CORE.accOn) {
+    // divider between the digital lanes and the accelerometer lanes
+    const y = AXIS_H + NCH * LANE_H;
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(cw, y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 }
 
 function drawTimeAxis(x0, x1, X) {
@@ -991,6 +1130,48 @@ function drawWaves(x0, x1, X) {
   }
 }
 
+/* Accelerometer lanes: X / Y / Z in mg, autoscaled to the visible window
+ * (with a floor so a flat trace stays visible), sharing the logic time base. */
+function drawAccelWaves(x0, x1, X) {
+  if (CORE.accT.length === 0) return;
+  const axes = [CORE.accX, CORE.accY, CORE.accZ];
+  const i0 = lowerBound(CORE.accT, x0);
+  const i1 = lowerBound(CORE.accT, x1);
+  if (i0 >= i1) return;
+  let stride = 1;
+  const cnt = i1 - i0;
+  if (cnt > 20000) stride = Math.ceil(cnt / 20000);
+
+  for (let a = 0; a < 3; a++) {
+    const arr = axes[a];
+    const lane = NCH + a;
+    const yHi = AXIS_H + lane * LANE_H + 4.5;
+    const yLo = AXIS_H + (lane + 1) * LANE_H - 4.5;
+    let vmin = Infinity, vmax = -Infinity;
+    for (let i = i0; i < i1; i += stride) {
+      const v = arr[i];
+      if (v < vmin) vmin = v;
+      if (v > vmax) vmax = v;
+    }
+    if (!isFinite(vmin)) continue;
+    let span = vmax - vmin;
+    if (span < 50) {                       // floor: flat traces stay visible
+      const mid = (vmin + vmax) / 2;
+      vmin = mid - 25; vmax = mid + 25; span = 50;
+    }
+    const Y = (v) => yLo - ((v - vmin) / span) * (yLo - yHi);
+
+    ctx.strokeStyle = ACC_LANE_COLORS[a];
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(X(CORE.accT[i0]), Y(arr[i0]));
+    for (let i = i0 + stride; i < i1; i += stride) {
+      ctx.lineTo(X(CORE.accT[i]), Y(arr[i]));
+    }
+    ctx.stroke();
+  }
+}
+
 function drawGutter() {
   ctx.font = '10.5px ui-monospace, Menlo, monospace';
   ctx.textBaseline = 'middle';
@@ -1002,6 +1183,17 @@ function drawGutter() {
     ctx.fillText('CH' + (ch + 1), 18, y);
     ctx.fillStyle = '#6d7b89';
     ctx.fillText('P' + (CORE.pins[ch] !== undefined ? CORE.pins[ch] : '?'), 56, y);
+  }
+  if (CORE.accOn) {
+    for (let a = 0; a < 3; a++) {
+      const y = AXIS_H + (NCH + a) * LANE_H + LANE_H / 2;
+      ctx.fillStyle = ACC_LANE_COLORS[a];
+      ctx.fillRect(6, y - 3, 6, 6);
+      ctx.fillStyle = '#c9d4de';
+      ctx.fillText('A' + 'XYZ'[a], 18, y);
+      ctx.fillStyle = '#6d7b89';
+      ctx.fillText('mg', 56, y);
+    }
   }
 }
 
@@ -1032,6 +1224,14 @@ function drawCursors(x0, x1, X) {
       readout += '  \u00B7  ' + (highs.length ? highs.join(' ') : 'all low');
     } else {
       readout += '  \u00B7  state unknown';
+    }
+    if (CORE.accOn && CORE.accT.length) {
+      const i = lowerBound(CORE.accT, VIEW.hoverT);
+      if (i > 0) {
+        const j = i - 1;
+        readout += '  \u00B7  AX ' + CORE.accX[j] + '  AY ' + CORE.accY[j] +
+                   '  AZ ' + CORE.accZ[j] + ' mg';
+      }
     }
   }
   els.cursorRead.textContent = readout;
@@ -1195,11 +1395,25 @@ function exportCSV() {
   }
   const head = ['time_s'];
   for (let i = 0; i < NCH; i++) head.push('ch' + (i + 1) + '_p' + CORE.pins[i]);
+  head.push('ax_mg', 'ay_mg', 'az_mg');
   csv += head.join(',') + '\n';
   for (let i = i0; i < i1; i++) {
     const row = [CORE.evT[i].toFixed(9)];
     for (let ch = 0; ch < NCH; ch++) row.push((CORE.evS[i] >> ch) & 1);
+    row.push('', '', '');
     csv += row.join(',') + '\n';
+  }
+  // Accelerometer samples within the same window: digital state at that time
+  // is filled in via the edge stream, so one CSV holds both domains aligned.
+  if (CORE.accOn && CORE.accT.length) {
+    const a0 = lowerBound(CORE.accT, x0), a1 = lowerBound(CORE.accT, x1);
+    for (let i = a0; i < a1; i++) {
+      const st = stateAt(CORE.accT[i]);
+      const row = [CORE.accT[i].toFixed(9)];
+      for (let ch = 0; ch < NCH; ch++) row.push(st === null ? '' : (st >> ch) & 1);
+      row.push(CORE.accX[i], CORE.accY[i], CORE.accZ[i]);
+      csv += row.join(',') + '\n';
+    }
   }
   const blob = new Blob([csv], { type: 'text/csv' });
   const a = document.createElement('a');
@@ -1239,7 +1453,23 @@ function updateStats() {
 /* ---------- main loop ---------- */
 function rafLoop(now) {
   if (now - UI.lastStats > 500) { updateStats(); UI.lastStats = now; }
+  if (now - UI.lastStats > 300) { updateAccelUI(); }   // cheap; catches state changes
   if (now - UI.lastTrim > 2000) { trimData(); UI.lastTrim = now; }
+  // ACC ON was sent but the Teensy never answered: almost always old firmware.
+  if (UI.accelPendingAt && now - UI.accelPendingAt > 1500) {
+    UI.accelPendingAt = 0;
+    setStatus('\u26A0 Accel: no reply from the Teensy', 'warn');
+    log('No #ACC reply within 1.5 s \u2014 the Teensy is probably still running the OLD firmware. Re-flash with: pio run -t upload', 'warn');
+  }
+  // Accel is ON and capturing, but no samples have arrived in a while.
+  if (CORE.accOn && CORE.capturing && CORE.wallStart && CORE.accT.length) {
+    const lastWall = CORE.wallStart + CORE.accT[CORE.accT.length - 1] * 1000;
+    if (now - lastWall > 2500 && now - (UI.accelStallWarnAt || 0) > 5000) {
+      UI.accelStallWarnAt = now;
+      setStatus('\u26A0 Accel stream stalled \u2014 no samples for 2.5 s', 'warn');
+      log('No accelerometer samples for 2.5 s while accel is ON \u2014 the chip may have stalled. Re-probe: click Accel OFF, then ON (firmware now auto-recovers and reports #ACCERR).', 'warn');
+    }
+  }
   checkConnection();
   checkNoData();
   if (UI.dirty || VIEW.follow || CORE.capturing) draw(now);
@@ -1272,6 +1502,16 @@ els.btnExport.addEventListener('click', exportCSV);
 els.btnApplyOuts.addEventListener('click', () => { sendOutsConfig(); });
 els.chkAutoApplyOuts.addEventListener('change', () => {
   if (els.chkAutoApplyOuts.checked && UI.connected) onOutChanged();
+});
+els.btnAccel.addEventListener('click', toggleAccel);
+els.accOdrSel.addEventListener('change', () => {
+  const hz = parseInt(els.accOdrSel.value, 10);
+  CORE.accOdr = hz;
+  if (UI.connected) {
+    sendCmd('ACCODR ' + hz);
+    log('\u2192 ACCODR ' + hz + ' Hz');
+  }
+  updateAccelUI();
 });
 els.pulseMs.addEventListener('change', () => {
   const ms = Math.min(3000, Math.max(1, parseInt(els.pulseMs.value, 10) || 100));
@@ -1317,6 +1557,7 @@ buildOutUI();
 buildMeasTable();
 updateApplyBtn();
 updateApplyOutsBtn();
+updateAccelUI();
 resize();
 rafLoop(0);
 setInterval(updateMeasTable, 150);
