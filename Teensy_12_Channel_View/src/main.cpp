@@ -31,6 +31,7 @@
 //     STOP                       stop capture
 //     WIN <ms>                   capture-window length (10..5000 ms)
 //     SETPIN <OE|EN|RST> <pin>   assign (or -1 to release) an output pin
+//     SET    <OE|EN|RST> <0|1>   force a constant level (0=LOW, 1=HIGH)
 //     PULSE  <OE|EN|RST>         pulse that output HIGH for PULSEW ms
 //     PULSEW <ms>                output pulse width (1..3000 ms)
 //     ACC ON|OFF                 enable/disable accelerometer streaming
@@ -42,7 +43,7 @@
 //     #FCPU <hz>                 actual CPU frequency
 //     #NCH <n>                   number of channels (always 12)
 //     #PINS <p0> ... <p11>       current channel->pin mapping
-//     #OUT <OE|EN|RST> <pin>     output pin assignment (-1 = none)
+//     #OUT <OE|EN|RST> <pin> <lvl>  output pin assignment (-1 = none) + static level
 //     #PULSEW <ms>               output pulse width
 //     #PULSE <name>              output pulse acknowledgement
 //     #WIN <ms>                  current window length
@@ -128,6 +129,7 @@ static uint32_t overflow = 0;        // events dropped because the ring filled
 static const char *outNames[NUM_OUTS] = {"OE", "EN", "RST"};
 static uint8_t  outPins[NUM_OUTS] = {PIN_NONE, PIN_NONE, PIN_NONE};
 static uint32_t outPulseStartCyc[NUM_OUTS] = {0, 0, 0};  // pulse start (0 = idle)
+static uint8_t  outLevels[NUM_OUTS] = {0, 0, 0};  // static resting level (0=LOW, 1=HIGH)
 static uint32_t pulseWidthCyc = 0;   // pulse length in cycles (set in setup())
 
 // ---------------------------------------------------------------------------
@@ -527,7 +529,9 @@ static void sendOuts(void) {
         Serial.print("#OUT ");
         Serial.print(outNames[i]);
         Serial.print(' ');
-        Serial.println(outPins[i] == PIN_NONE ? -1 : (int)outPins[i]);
+        Serial.print(outPins[i] == PIN_NONE ? -1 : (int)outPins[i]);
+        Serial.print(' ');
+        Serial.println(outPins[i] == PIN_NONE ? 0 : (int)outLevels[i]);
     }
     Serial.print("#PULSEW ");
     Serial.println(pulseWidthCyc / (F_CPU_ACTUAL / 1000UL));
@@ -551,15 +555,29 @@ static bool configureOut(const char *name, long pin) {
         outPins[i] = PIN_NONE;
     }
     outPulseStartCyc[i] = 0;               // cancel any pending pulse
+    outLevels[i] = 0;                      // fresh assignment rests LOW
     if (pin >= 0) {
         outPins[i] = (uint8_t)pin;
         pinMode(outPins[i], OUTPUT);
-        digitalWrite(outPins[i], LOW);     // idle LOW
+        digitalWrite(outPins[i], outLevels[i] ? HIGH : LOW);
     }
     return true;
 }
 
-/* Pulse the output HIGH for the configured width, then back LOW. */
+/* Force the output to a constant level (0 = LOW, 1 = HIGH) until changed.
+ * Cancels any in-flight pulse so it cannot fight the static level. */
+static bool setOutLevel(const char *name, long level) {
+    int8_t i = outIndexByName(name);
+    if (i < 0 || outPins[i] == PIN_NONE) return false;
+    if (level != 0 && level != 1) return false;
+    outLevels[i] = (uint8_t)level;
+    outPulseStartCyc[i] = 0;               // cancel any pending pulse
+    digitalWrite(outPins[i], outLevels[i] ? HIGH : LOW);
+    return true;
+}
+
+/* Pulse the output HIGH for the configured width, then back to its static
+ * resting level (outLevels[i]). */
 static bool pulseOut(const char *name) {
     int8_t i = outIndexByName(name);
     if (i < 0 || outPins[i] == PIN_NONE) return false;
@@ -568,14 +586,14 @@ static bool pulseOut(const char *name) {
     return true;
 }
 
-/* Called from the main loop: bring pulsed outputs back LOW once the
- * configured width has elapsed.  Uses signed cycle deltas so the 32-bit
- * cycle-counter wrap (every ~7 s) is handled correctly. */
+/* Called from the main loop: bring pulsed outputs back to their static
+ * resting level once the configured width has elapsed.  Uses signed cycle
+ * deltas so the 32-bit cycle-counter wrap (every ~7 s) is handled. */
 static void updateOutPulses(void) {
     for (uint8_t i = 0; i < NUM_OUTS; i++) {
         if (outPulseStartCyc[i] == 0) continue;
         if ((int32_t)(ARM_DWT_CYCCNT - outPulseStartCyc[i]) >= (int32_t)pulseWidthCyc) {
-            digitalWrite(outPins[i], LOW);
+            digitalWrite(outPins[i], outLevels[i] ? HIGH : LOW);
             outPulseStartCyc[i] = 0;
         }
     }
@@ -692,6 +710,20 @@ static void dispatch(const char *line) {
             sendOuts();
         } else {
             Serial.println("#ERR invalid output (use: SETPIN OE|EN|RST <pin|-1>)");
+        }
+    } else if (strncmp(line, "SET", 3) == 0 && (line[3] == ' ' || line[3] == 0)) {
+        // SET <OE|EN|RST> <0|1>   - force a constant level until changed
+        char name[8];
+        const char *p = line + 3;
+        while (*p == ' ') p++;
+        int n = 0;
+        while (*p && *p != ' ' && n < 7) name[n++] = *p++;
+        name[n] = 0;
+        long level = strtol(p, NULL, 10);
+        if (setOutLevel(name, level)) {
+            sendOuts();
+        } else {
+            Serial.println("#ERR invalid (use: SET OE|EN|RST <0|1> with a pin assigned)");
         }
     } else if (strncmp(line, "PULSE", 5) == 0 && (line[5] == ' ' || line[5] == 0)) {
         // PULSE <OE|EN|RST>   (delimiter guard so "PULSEW ..." is not caught here)

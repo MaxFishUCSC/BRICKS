@@ -114,16 +114,22 @@ Click a pulse-width value to zoom to that pulse.
 
 ### Output drivers (OE / EN / RST)
 
-Three extra buttons for driving control lines of your device under test:
+Three output drivers for the control lines of your device under test:
 
 * Give each of **OE**, **EN**, **RST** its own pin via the dropdowns (same
   pin list as the channels), or leave one at *“none”*.
-* Click **Pulse** (or the ▶ button) to drive that pin **HIGH for the pulse
-  width** (default 100 ms, adjustable 1–3000 ms), then back LOW.
-* Outputs are **idle LOW, 3.3 V**, configured as outputs only when assigned.
-* Config is remembered across reloads and re-applied on connect, exactly like
-  the channel pins. Avoid using a pin that you also sample as a channel — the
-  viewer warns if you do.
+* **Static level — H / L buttons:** force an output **constant HIGH or LOW**
+  until you change it (e.g. hold EN HIGH to keep the device enabled, OE LOW to
+  keep outputs disabled). The dot beside the name glows when held HIGH. This
+  is remembered across reloads and re-applied on connect.
+* **Pulse** (or the ▶ button) drives the pin **HIGH for the pulse width**
+  (default 100 ms, adjustable 1–3000 ms), then back to its **static level**
+  (LOW unless you set it HIGH). So you can hold EN HIGH and still fire
+  momentary RST-style pulses.
+* Outputs are **3.3 V** and configured as outputs only when assigned.
+* Config (pins, levels, pulse width) is remembered across reloads and
+  re-applied on connect, exactly like the channel pins. Avoid using a pin that
+  you also sample as a channel — the viewer warns if you do.
 * Note: the pulse timing is accurate to within one capture window; lower the
   **Window** value (e.g. 10–25 ms) if you need tight pulse widths while
   capturing.
@@ -209,6 +215,7 @@ START                            begin capture, time base resets to 0
 STOP                             stop capture
 WIN 100                          capture-window length in ms (10..5000)
 SETPIN OE 22                     assign output pin (or -1 to release)
+SET    OE 1                      force output constant level (0 = LOW, 1 = HIGH)
 PULSE  RST                       pulse that output HIGH for PULSEW ms
 PULSEW 100                       output pulse width in ms (1..3000)
 ACC ON|OFF                       enable/disable the accelerometer stream
@@ -223,7 +230,7 @@ INFO                             re-send header/pin/output/status lines
 #FCPU 600000000                  actual CPU clock in Hz
 #NCH 12
 #PINS 0 1 2 ... 11               current channel->pin mapping
-#OUT OE 22                       output pin assignment (-1 = none)
+#OUT OE 22 1                     output pin assignment (-1 = none) + static level
 #PULSEW 100                      output pulse width
 #PULSE RST                       output pulse acknowledgement
 #WIN 100                         window length

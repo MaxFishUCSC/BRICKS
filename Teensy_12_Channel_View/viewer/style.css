@@ -118,6 +118,24 @@ button.pulsebtn.pulsing {
   background: #ffe082; color: #201500;
   border-color: #fbc02d; box-shadow: 0 0 0 2px rgba(251,192,45,.35);
 }
+/* static level buttons (H / L) */
+button.lvlbtn {
+  font-weight: 700; font-size: 11.5px;
+  min-width: 26px; padding: 2px 7px; border-radius: 6px;
+}
+button.lvlbtn.active {
+  background: #1b3a2a; color: #81c784;
+  border-color: #2e7d32; box-shadow: 0 0 0 1px rgba(46,125,50,.5);
+}
+button.lvlbtn.hbtn.active {
+  background: #3a2a1b; color: #ffd54f;
+  border-color: #b8860b; box-shadow: 0 0 0 1px rgba(184,134,11,.5);
+}
+button.lvlbtn.lbtn.active {
+  background: #241d30; color: #9e9e9e;
+  border-color: #546e7a; box-shadow: 0 0 0 1px rgba(84,110,122,.5);
+}
+.outrow .odot { transition: background .15s, box-shadow .15s; }
 #outErr { color: var(--err); font-size: 11.5px; margin-top: 6px; min-height: 0; }
 #pulseMs {
   width: 64px;

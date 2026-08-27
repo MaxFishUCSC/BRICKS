@@ -39,7 +39,8 @@ const DEFAULT_PINS = [0,1,2,3,4,5,6,7,8,9,10,11];
 /* Output drivers (OE / EN / RST): assignable pins that pulse HIGH on demand. */
 const OUT_NAMES = ['OE', 'EN', 'RST'];
 const OUT_COLORS = { OE: '#ffd54f', EN: '#4db6ac', RST: '#f48fb1' };
-const DEFAULT_OUTS = { oe: -1, en: -1, rst: -1, pw: 100 };   // -1 = none
+// pins (-1 = none), pulse width, and static resting level (0=LOW, 1=HIGH)
+const DEFAULT_OUTS = { oe: -1, en: -1, rst: -1, pw: 100, oeLv: 0, enLv: 0, rstLv: 0 };
 
 /* Shared core state (also used by the demo generator). */
 const CORE = {
@@ -478,7 +479,10 @@ function onDataLine(line) {
     case '#START': startCaptureLocal('Teensy acknowledged: capture started'); break;
     case '#STOP':  log('Teensy acknowledged: capture stopped'); stopCaptureLocal(); break;
     case '#PINS':  syncPinUI(false); break;
-    case '#OUT':   if (p[1] && FW_OUTS[p[1].toLowerCase()] !== undefined) { FW_OUTS[p[1].toLowerCase()] = parseInt(p[2], 10); } break;
+    case '#OUT':   if (p[1] && FW_OUTS[p[1].toLowerCase()] !== undefined) {
+                     FW_OUTS[p[1].toLowerCase()] = parseInt(p[2], 10);
+                     FW_OUTS[p[1].toLowerCase() + 'Lv'] = parseInt(p[3], 10) === 1 ? 1 : 0;
+                   } break;
     case '#PULSEW': FW_OUTS.pw = parseInt(p[1], 10) || 100; break;
     case '#PULSE': log('Teensy: ' + p[1] + ' pulsed'); break;
     case '#WIN':   if (!UI.syncing) els.winSel.value = String(CORE.winMs); break;
@@ -713,8 +717,10 @@ function buildOutUI() {
   OUT_NAMES.forEach(name => {
     const row = document.createElement('div');
     row.className = 'outrow';
+    row.dataset.out = name;
     const dot = document.createElement('span');
     dot.className = 'odot';
+    dot.dataset.out = name;
     dot.style.background = OUT_COLORS[name];
     const lbl = document.createElement('span');
     lbl.className = 'outlabel';
@@ -734,21 +740,52 @@ function buildOutUI() {
     }
     sel.value = String(CORE.outs[name.toLowerCase()] !== undefined ? CORE.outs[name.toLowerCase()] : -1);
     sel.addEventListener('change', onOutChanged);
+    // static level buttons: force the output constant HIGH or LOW
+    const btnH = document.createElement('button');
+    btnH.className = 'lvlbtn hbtn';
+    btnH.dataset.out = name;
+    btnH.textContent = 'H';
+    btnH.title = 'Force ' + name + ' constant HIGH until changed';
+    btnH.addEventListener('click', () => setOutLevel(name, 1));
+    const btnL = document.createElement('button');
+    btnL.className = 'lvlbtn lbtn';
+    btnL.dataset.out = name;
+    btnL.textContent = 'L';
+    btnL.title = 'Force ' + name + ' constant LOW until changed';
+    btnL.addEventListener('click', () => setOutLevel(name, 0));
     const btn = document.createElement('button');
     btn.className = 'pulsebtn';
     btn.dataset.out = name;
     btn.textContent = '\u25B6 ' + name;
     btn.title = 'Pulse ' + name + ' HIGH for the configured width';
     btn.addEventListener('click', () => pulseOut(name));
-    row.appendChild(dot); row.appendChild(lbl); row.appendChild(sel); row.appendChild(btn);
+    row.appendChild(dot); row.appendChild(lbl); row.appendChild(sel);
+    row.appendChild(btnH); row.appendChild(btnL); row.appendChild(btn);
     els.outList.appendChild(row);
   });
+}
+
+/* Level buttons + dot reflect the static resting level (dim LOW, glowing HIGH). */
+function updateOutUI(name) {
+  const key = name.toLowerCase();
+  const lvl = (CORE.outs[key + 'Lv'] === 1) ? 1 : 0;
+  const dot = els.outList.querySelector('.odot[data-out="' + name + '"]');
+  if (dot) {
+    dot.style.background = lvl ? OUT_COLORS[name] : '#3a4450';
+    dot.style.boxShadow = lvl ? '0 0 6px ' + OUT_COLORS[name] : 'none';
+  }
+  const btnH = els.outList.querySelector('button.hbtn[data-out="' + name + '"]');
+  const btnL = els.outList.querySelector('button.lbtn[data-out="' + name + '"]');
+  if (btnH) btnH.classList.toggle('active', lvl === 1);
+  if (btnL) btnL.classList.toggle('active', lvl === 0);
 }
 
 function readOutsFromUI() {
   const o = {};
   OUT_NAMES.forEach(name => {
-    o[name.toLowerCase()] = parseInt(els.outList.querySelector('select[data-out="' + name + '"]').value, 10);
+    const k = name.toLowerCase();
+    o[k] = parseInt(els.outList.querySelector('select[data-out="' + name + '"]').value, 10);
+    o[k + 'Lv'] = (CORE.outs[k + 'Lv'] === 1) ? 1 : 0;   // static levels live in CORE.outs
   });
   o.pw = parseInt(els.pulseMs.value, 10) || 100;
   return o;
@@ -797,6 +834,12 @@ function sendOutsConfig() {
   });
   sendCmd('PULSEW ' + CORE.outs.pw);
   log('\u2192 PULSEW ' + CORE.outs.pw + ' ms');
+  OUT_NAMES.forEach(n => {
+    const k = n.toLowerCase();
+    const lvl = CORE.outs[k + 'Lv'] === 1 ? 1 : 0;
+    sendCmd('SET ' + n + ' ' + lvl);
+    log('\u2192 SET ' + n + ' ' + (lvl ? 'HIGH' : 'LOW'));
+  });
 }
 
 function pulseOut(name) {
@@ -822,7 +865,7 @@ function pulseOut(name) {
   sendCmd('PULSE ' + name);
   log('\u2192 PULSE ' + name + ' (P' + pin + ')');
   // visual feedback for the (local estimate of the) pulse duration
-  const btn = els.outList.querySelector('button[data-out="' + name + '"]');
+  const btn = els.outList.querySelector('button.pulsebtn[data-out="' + name + '"]');
   if (btn) {
     btn.classList.add('pulsing');
     btn.textContent = '\u25A0 ' + name;
@@ -831,6 +874,34 @@ function pulseOut(name) {
       btn.textContent = '\u25B6 ' + name;
     }, Math.max(50, CORE.outs.pw));
   }
+}
+
+/* Force an output to a constant level (0 = LOW, 1 = HIGH) until changed. */
+function setOutLevel(name, level) {
+  const key = name.toLowerCase();
+  const pin = CORE.outs[key];
+  if (UI.demo) { log('Outputs are not active in demo mode.', 'warn'); return; }
+  if (!UI.connected) {
+    setStatus('Connect the Teensy first', 'warn');
+    log('Connect the Teensy, then set ' + name + '.', 'warn');
+    return;
+  }
+  if (pin < 0) {
+    setStatus('Assign a pin to ' + name + ' first', 'warn');
+    log('Pick a pin for the ' + name + ' output (dropdown) before setting its level.', 'warn');
+    return;
+  }
+  // Make sure the Teensy has this assignment first (auto-apply may be off);
+  // commands are processed in order, so SETPIN then SET is safe.
+  if (FW_OUTS[key] !== pin) {
+    sendCmd('SETPIN ' + name + ' ' + pin);
+    FW_OUTS[key] = pin;
+  }
+  sendCmd('SET ' + name + ' ' + level);
+  log('\u2192 SET ' + name + ' ' + (level ? 'HIGH' : 'LOW') + ' (P' + pin + ')');
+  CORE.outs[key + 'Lv'] = level ? 1 : 0;
+  saveOuts();
+  updateOutUI(name);
 }
 
 function syncOutUI() {
@@ -842,6 +913,7 @@ function syncOutUI() {
   els.pulseMs.value = String(CORE.outs.pw);
   UI.syncing = false;
   onOutChanged();                       // refresh warnings + CORE.outs
+  OUT_NAMES.forEach(n => updateOutUI(n));   // level buttons + dots
 }
 
 function saveOuts() {
@@ -851,7 +923,11 @@ function loadOuts() {
   try {
     const v = JSON.parse(localStorage.getItem('t4la.outs'));
     if (v && typeof v === 'object' && OUT_NAMES.every(n => v[n.toLowerCase()] !== undefined)) {
-      CORE.outs = { oe: v.oe, en: v.en, rst: v.rst, pw: Math.min(3000, Math.max(1, v.pw || 100)) };
+      CORE.outs = {
+        oe: v.oe, en: v.en, rst: v.rst,
+        pw: Math.min(3000, Math.max(1, v.pw || 100)),
+        oeLv: v.oeLv === 1 ? 1 : 0, enLv: v.enLv === 1 ? 1 : 0, rstLv: v.rstLv === 1 ? 1 : 0
+      };
       return true;
     }
   } catch (e) {}
@@ -860,12 +936,13 @@ function loadOuts() {
 
 /* After (re)connect: if the saved output config differs from what the Teensy
  * reported (FW_OUTS), push ours so the board matches the UI. */
-const FW_OUTS = { oe: -1, en: -1, rst: -1, pw: 100 };   // what the Teensy has
+const FW_OUTS = { oe: -1, en: -1, rst: -1, pw: 100, oeLv: 0, enLv: 0, rstLv: 0 };   // what the Teensy has
 function maybeAutoApplyOuts() {
   if (!UI.connected) return;
   const saved = loadOuts();             // true -> CORE.outs now holds the saved set
   if (!saved) return;
-  const differs = OUT_NAMES.some(n => FW_OUTS[n.toLowerCase()] !== CORE.outs[n.toLowerCase()]) ||
+  const differs = OUT_NAMES.some(n => FW_OUTS[n.toLowerCase()] !== CORE.outs[n.toLowerCase()] ||
+                                      FW_OUTS[n.toLowerCase() + 'Lv'] !== CORE.outs[n.toLowerCase() + 'Lv']) ||
                   FW_OUTS.pw !== CORE.outs.pw;
   if (differs) { syncOutUI(); sendOutsConfig(); }
 }
