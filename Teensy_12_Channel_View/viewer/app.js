@@ -1013,8 +1013,11 @@ function draw(now) {
     let tNow = CORE.evT.length ? CORE.evT[CORE.evT.length - 1] : 0;
     if (CORE.accT.length && CORE.accT[CORE.accT.length - 1] > tNow) tNow = CORE.accT[CORE.accT.length - 1];
     if (CORE.capturing && CORE.wallStart) {
+      // Wall clock keeps the view scrolling while signals are idle, but never
+      // more than 50 ms ahead of the newest sample - otherwise the graph
+      // appears to "jump" into empty space and the time readout runs away.
       const wall = (performance.now() - CORE.wallStart) / 1000;
-      if (wall > tNow) tNow = wall;
+      if (wall > tNow + 0.05) tNow = wall - 0.05;
     }
     VIEW.right = Math.max(tNow + 0.0005, 0.000001);
     VIEW.right = Math.max(VIEW.right, VIEW.span);
@@ -1348,6 +1351,11 @@ function drawAccelTraces(x0, x1, X) {
   let stride = 1;
   const cnt = i1 - i0;
   if (cnt > 20000) stride = Math.ceil(cnt / 20000);
+  // Expected sample spacing; a bigger jump means samples were lost (stall,
+  // overflow, window boundary) - draw an honest gap instead of a misleading
+  // straight "slope" across the missing data.
+  const period = (CORE.accOdr > 0) ? 1 / CORE.accOdr : 0.002;
+  const gapThreshold = 2.5 * period * stride;
   const axes = [CORE.accX, CORE.accY, CORE.accZ];
   for (let a = 0; a < 3; a++) {
     const range = accelRanges[a];
@@ -1360,6 +1368,10 @@ function drawAccelTraces(x0, x1, X) {
     ctxA.beginPath();
     ctxA.moveTo(X(CORE.accT[i0]), Y(arr[i0]));
     for (let i = i0 + stride; i < i1; i += stride) {
+      if (CORE.accT[i] - CORE.accT[i - stride] > gapThreshold) {
+        ctxA.moveTo(X(CORE.accT[i]), Y(arr[i]));   // break the line at the gap
+        continue;
+      }
       ctxA.lineTo(X(CORE.accT[i]), Y(arr[i]));
     }
     ctxA.stroke();

@@ -166,7 +166,7 @@ static uint32_t pulseWidthCyc = 0;   // pulse length in cycles (set in setup())
 #define ACC_SPI_HZ       10000000UL   // ADXL355/359 SPI max clock
 #define ACC_LSB_PER_G    51200        // at +-10 g (reset range)
 #define ACC_FIFO_SAMPLES 32           // 96 locations / 3 per sample
-#define ACC_STAGE_MAX    512          // staged samples (power of two)
+#define ACC_STAGE_MAX    2048         // staged samples (power of two; ~0.5 s at 4 kHz)
 #define ACC_PAUSES_MAX   16           // max in-window SPI pauses per window
 
 #define ACC_REG_DEVID    0x00
@@ -260,7 +260,6 @@ static int accelCollect(uint32_t tNowAbs) {
     digitalWriteFast(ACC_CS_PIN, LOW);
     SPI.transfer((ACC_REG_FIFO_DAT << 1) | 0x01);
 
-    int taken = 0;                              // valid samples staged
     for (int k = 0; k < nSamp; k++) {
         uint8_t b[9];
         for (int i = 0; i < 9; i++) b[i] = SPI.transfer(0x00);
@@ -273,16 +272,17 @@ static int accelCollect(uint32_t tNowAbs) {
             if (raw & 0x80000) raw -= 0x100000; // sign-extend 20 bits
             out[a] = raw;
         }
-        // Back-date: this is the (taken)-th sample of nSamp, i.e. it was
-        // taken (nSamp - taken) ODR periods before the drain instant.
+        // Back-date by the sample's true position: the k-th oldest of nSamp
+        // was taken (nSamp - k) ODR periods before the drain instant.  Using
+        // the loop index (not a "staged so far" counter) keeps the timestamps
+        // correct even when pre-capture samples are skipped.
         int64_t tRel = (int64_t)(tNowAbs - tBase) -
-                       (int64_t)(nSamp - taken) * accOdrCyc;
+                       (int64_t)(nSamp - k) * accOdrCyc;
         if (tRel < 0) continue;                 // pre-capture data
         stageAccel((uint32_t)tRel,
                    (int32_t)((int64_t)out[0] * 1000 / ACC_LSB_PER_G),
                    (int32_t)((int64_t)out[1] * 1000 / ACC_LSB_PER_G),
                    (int32_t)((int64_t)out[2] * 1000 / ACC_LSB_PER_G));
-        taken++;
     }
 
     digitalWriteFast(ACC_CS_PIN, HIGH);
