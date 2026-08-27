@@ -154,6 +154,10 @@ button.pulsebtn.pulsing {
 
 #waveWrap { position: relative; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #0a0e12; }
 #wave { display: block; width: 100%; }
+
+/* ---------- large accelerometer plot ---------- */
+#accPlotWrap { position: relative; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: #0a0e12; }
+#accWave { display: block; width: 100%; }
 .cursorread {
   position: absolute; top: 6px; right: 10px;
   font-size: 12px; color: var(--accent);

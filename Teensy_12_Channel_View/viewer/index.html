@@ -101,6 +101,14 @@
     <div class="warn" style="margin-top:6px;">Zoom: scroll wheel &middot; Pan: drag &middot; Cursor A: click &middot; Cursor B: shift+click &middot; Clear cursors / zoom to a pulse: double-click a lane &middot; Reset graph: &#8635; button or R</div>
   </section>
 
+  <section class="card" id="accPlotPanel" style="display:none">
+    <div class="cardtitle">Accelerometer &mdash; actual values<span class="hint">AX / AY / AZ in mg &middot; shared time axis with the logic lanes &middot; zoom / pan / cursors work here too</span></div>
+    <div id="accPlotWrap">
+      <canvas id="accWave"></canvas>
+      <div id="accReadout" class="cursorread"></div>
+    </div>
+  </section>
+
   <section class="card" id="measPanel">
     <div class="cardtitle">Pulse measurements<span class="hint">last completed pulse &middot; period = rise-to-rise &middot; click a pulse width to zoom to it</span></div>
     <table id="measTable">

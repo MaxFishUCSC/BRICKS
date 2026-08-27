@@ -336,12 +336,18 @@ const els = {
   winSel: $('winSel'), spanSel: $('spanSel'), chkFollow: $('chkFollow'),
   btnExport: $('btnExport'), stats: $('stats'), wave: $('wave'), waveWrap: $('waveWrap'),
   cursorRead: $('cursorRead'), measBody: $('measBody'), log: $('log'),
-  btnAccel: $('btnAccel'), accOdrSel: $('accOdrSel'), accStatus: $('accStatus')
+  btnAccel: $('btnAccel'), accOdrSel: $('accOdrSel'), accStatus: $('accStatus'),
+  accPlotPanel: $('accPlotPanel'), accPlotWrap: $('accPlotWrap'),
+  accWave: $('accWave'), accReadout: $('accReadout')
 };
 
 /* Accelerometer lane styling (AX / AY / AZ) */
 const ACC_LANE_COLORS = ['#4fc3f7', '#aed581', '#ffd740'];
 const ACC_PINS = [11, 12, 13, 35];   // SPI SCK/MOSI/MISO + accel CS
+
+/* Large accelerometer plot: three stacked sub-plots with real Y-axis values
+ * (mg), sharing the same time base / zoom / cursors as the logic waveform. */
+const ACC_GUTTER = 64, ACC_SUB_H = 92, ACC_AXIS_H = 22;
 
 const VIEW = { span: 0.5, right: 0.001, follow: true, cursorA: null, cursorB: null, hoverT: null };
 const UI = { connected: false, demo: false, syncing: false, dirty: true,
@@ -890,7 +896,9 @@ function toggleAccel() {
 function updateAccelUI() {
   const wasOn = UI.lastAccelOnUI;
   UI.lastAccelOnUI = CORE.accOn;
-  if (wasOn !== CORE.accOn) resize();       // 3 extra lanes appear/disappear
+  // Show/hide the large plot FIRST so resize() below measures a visible panel.
+  if (els.accPlotPanel) els.accPlotPanel.style.display = CORE.accOn ? '' : 'none';
+  if (wasOn !== CORE.accOn) resize();       // lanes + big plot appear/disappear
   els.btnAccel.textContent = 'Accel: ' + (CORE.accOn ? 'ON' : 'OFF');
   els.btnAccel.classList.toggle('acc-on', CORE.accOn);
   els.btnAccel.classList.toggle('acc-err', !UI.demo && CORE.accErr && !CORE.accOn);
@@ -969,6 +977,9 @@ const ctx = cv.getContext('2d');
 const GUTTER = 104, AXIS_H = 30, LANE_H = 26;
 let cw = 0, chH = 0, dpr = 1;
 
+const ctxA = els.accWave ? els.accWave.getContext('2d') : null;
+let accCW = 0, accH = 0, dprA = 1;
+
 function resize() {
   dpr = window.devicePixelRatio || 1;
   cw = els.waveWrap.clientWidth - 2;
@@ -978,6 +989,21 @@ function resize() {
   cv.style.height = chH + 'px';
   cv.width = Math.max(1, Math.round(cw * dpr));
   cv.height = Math.max(1, Math.round(chH * dpr));
+  // Large accelerometer plot below the waveform.  Only size it while its
+  // panel is actually visible (a hidden panel has zero width; sizing to that
+  // would shrink the canvas to ~1 px and stretch it).
+  if (els.accWave) {
+    const w = els.accPlotWrap ? els.accPlotWrap.clientWidth : 0;
+    if (w > 0) {
+      dprA = dpr;
+      accCW = w - 2;
+      accH = 3 * ACC_SUB_H + ACC_AXIS_H;
+      els.accWave.style.width = accCW + 'px';
+      els.accWave.style.height = accH + 'px';
+      els.accWave.width = Math.max(1, Math.round(accCW * dprA));
+      els.accWave.height = Math.max(1, Math.round(accH * dprA));
+    }
+  }
   UI.dirty = true;
 }
 
@@ -985,6 +1011,7 @@ function draw(now) {
   if (cw === 0) return;
   if (VIEW.follow) {
     let tNow = CORE.evT.length ? CORE.evT[CORE.evT.length - 1] : 0;
+    if (CORE.accT.length && CORE.accT[CORE.accT.length - 1] > tNow) tNow = CORE.accT[CORE.accT.length - 1];
     if (CORE.capturing && CORE.wallStart) {
       const wall = (performance.now() - CORE.wallStart) / 1000;
       if (wall > tNow) tNow = wall;
@@ -1008,6 +1035,7 @@ function draw(now) {
   if (CORE.accOn) drawAccelWaves(x0, x1, X);
   drawGutter();
   drawCursors(x0, x1, X);
+  if (CORE.accOn && ctxA) drawAccelPlot(x0, x1);
   UI.dirty = false;
 }
 
@@ -1172,6 +1200,238 @@ function drawAccelWaves(x0, x1, X) {
   }
 }
 
+/* ==========================================================================
+ * Large accelerometer plot (below the waveform): three stacked sub-plots with
+ * real Y-axis values in mg, sharing VIEW (time base, zoom, pan, cursors).
+ * ==========================================================================*/
+function niceStep(span) {
+  if (!(span > 0)) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(span)));
+  for (const m of [1, 2, 5, 10]) if (mag * m >= span) return mag * m;
+  return mag * 10;
+}
+
+/* Visible value range for one axis; null when no samples are in view. */
+function accelViewRange(arr, i0, i1) {
+  let vmin = Infinity, vmax = -Infinity;
+  for (let i = i0; i < i1; i++) {
+    const v = arr[i];
+    if (v < vmin) vmin = v;
+    if (v > vmax) vmax = v;
+  }
+  if (!isFinite(vmin)) return null;
+  let span = vmax - vmin;
+  if (span < 50) {                 // floor: flat traces stay visible
+    const mid = (vmin + vmax) / 2;
+    vmin = mid - 25; vmax = mid + 25; span = 50;
+  }
+  return { vmin, vmax, span };
+}
+
+let accelRanges = [null, null, null];   // computed by the grid, used by traces
+
+function drawAccelPlot(x0, x1) {
+  if (accCW === 0) return;
+  const plotW = accCW - ACC_GUTTER;
+  const X = (t) => ACC_GUTTER + ((t - x0) / VIEW.span) * plotW;
+  ctxA.setTransform(dprA, 0, 0, dprA, 0, 0);
+  ctxA.clearRect(0, 0, accCW, accH);
+  ctxA.fillStyle = '#0a0e12';
+  ctxA.fillRect(0, 0, accCW, accH);
+  drawAccelGaps(x0, x1, X);
+  drawAccelGrid(x0, x1, X);
+  drawAccelTraces(x0, x1, X);
+  drawAccelTimeAxis(x0, x1, X);
+  drawAccelCursors(x0, x1, X);
+  updateAccelReadout();
+}
+
+function drawAccelGaps(x0, x1, X) {
+  for (const g of CORE.gaps) {
+    const a = Math.max(g.t0, x0), b = Math.min(g.t1, x1);
+    if (a >= b) continue;
+    ctxA.fillStyle = 'rgba(240,130,60,0.07)';
+    ctxA.fillRect(X(a), 0, X(b) - X(a), accH - ACC_AXIS_H);
+  }
+}
+
+function drawAccelGrid(x0, x1, X) {
+  const i0 = lowerBound(CORE.accT, x0), i1 = lowerBound(CORE.accT, x1);
+  const noData = i0 >= i1;
+  const axes = [CORE.accX, CORE.accY, CORE.accZ];
+  // ONE shared Y scale across all three axes so the difference in g-forces
+  // is obvious (per-axis autoscale would exaggerate relative motion).  Zero
+  // is always on the axis so a quiet axis sits visibly at rest.
+  let sMin = 0, sMax = 0;
+  if (!noData) {
+    for (let a = 0; a < 3; a++) {
+      const r = accelViewRange(axes[a], i0, i1);
+      if (!r) continue;
+      sMin = Math.min(sMin, r.vmin);
+      sMax = Math.max(sMax, r.vmax);
+    }
+    if (sMax - sMin < 50) {          // floor: quiet signals stay visible
+      const mid = (sMin + sMax) / 2;
+      sMin = mid - 25; sMax = mid + 25;
+    }
+  } else {
+    sMin = -1000; sMax = 1000;
+  }
+  const sRange = { vmin: sMin, vmax: sMax, span: sMax - sMin };
+  for (let a = 0; a < 3; a++) {
+    const y0 = a * ACC_SUB_H + 16, y1 = (a + 1) * ACC_SUB_H - 6;
+    const yTop = a * ACC_SUB_H;
+    if (a % 2 === 0) {
+      ctxA.fillStyle = 'rgba(255,255,255,0.025)';
+      ctxA.fillRect(ACC_GUTTER, yTop, accCW - ACC_GUTTER, ACC_SUB_H);
+    }
+    // border between sub-plots
+    ctxA.strokeStyle = '#1b222b';
+    ctxA.beginPath(); ctxA.moveTo(0, yTop); ctxA.lineTo(accCW, yTop); ctxA.stroke();
+
+    accelRanges[a] = sRange;
+    const vmin = sRange.vmin, vmax = sRange.vmax;
+    const Y = (v) => y1 - ((v - vmin) / sRange.span) * (y1 - y0);
+
+    // axis label
+    ctxA.fillStyle = ACC_LANE_COLORS[a];
+    ctxA.fillRect(6, yTop + 5, 10, 10);
+    ctxA.fillStyle = '#c9d4de';
+    ctxA.font = 'bold 11.5px ui-monospace, Menlo, monospace';
+    ctxA.textBaseline = 'middle';
+    ctxA.fillText('A' + 'XYZ'[a], 22, yTop + 10);
+    ctxA.fillStyle = '#6d7b89';
+    ctxA.font = '10.5px ui-monospace, Menlo, monospace';
+    ctxA.fillText('mg', ACC_GUTTER - 30, yTop + 10);
+
+    // Y gridlines + value labels (real numbers)
+    const step = niceStep((vmax - vmin) / 4);
+    ctxA.font = '10.5px ui-monospace, Menlo, monospace';
+    ctxA.textBaseline = 'middle';
+    for (let v = Math.ceil(vmin / step) * step; v <= vmax + step * 0.5; v += step) {
+      const y = Math.round(Y(v));
+      if (y < y0 || y > y1) continue;
+      ctxA.strokeStyle = v === 0 ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.06)';
+      ctxA.lineWidth = 1;
+      if (v === 0) ctxA.setLineDash([3, 3]);
+      ctxA.beginPath(); ctxA.moveTo(ACC_GUTTER, y); ctxA.lineTo(accCW, y); ctxA.stroke();
+      ctxA.setLineDash([]);
+      ctxA.fillStyle = v === 0 ? '#b9c6d2' : '#6d7b89';
+      ctxA.textAlign = 'right';
+      ctxA.fillText(String(Math.round(v)), ACC_GUTTER - 7, y);
+      ctxA.textAlign = 'left';
+    }
+    // Y axis line
+    ctxA.strokeStyle = '#222b36';
+    ctxA.beginPath(); ctxA.moveTo(ACC_GUTTER, yTop); ctxA.lineTo(ACC_GUTTER, y1); ctxA.stroke();
+  }
+  if (noData && CORE.accT.length === 0) {
+    ctxA.fillStyle = '#6d7b89';
+    ctxA.font = '12px ui-monospace, Menlo, monospace';
+    ctxA.textBaseline = 'middle';
+    ctxA.textAlign = 'center';
+    ctxA.fillText('no accelerometer samples yet \u2014 press Start / check wiring', accCW / 2, accH / 2);
+    ctxA.textAlign = 'left';
+  } else if (noData) {
+    ctxA.fillStyle = '#6d7b89';
+    ctxA.font = '12px ui-monospace, Menlo, monospace';
+    ctxA.textBaseline = 'middle';
+    ctxA.textAlign = 'center';
+    ctxA.fillText('no accelerometer samples in this time span \u2014 zoom out', accCW / 2, accH / 2);
+    ctxA.textAlign = 'left';
+  }
+}
+
+function drawAccelTraces(x0, x1, X) {
+  const i0 = lowerBound(CORE.accT, x0), i1 = lowerBound(CORE.accT, x1);
+  if (i0 >= i1) return;
+  let stride = 1;
+  const cnt = i1 - i0;
+  if (cnt > 20000) stride = Math.ceil(cnt / 20000);
+  const axes = [CORE.accX, CORE.accY, CORE.accZ];
+  for (let a = 0; a < 3; a++) {
+    const range = accelRanges[a];
+    if (!range) continue;
+    const arr = axes[a];
+    const y0 = a * ACC_SUB_H + 16, y1 = (a + 1) * ACC_SUB_H - 6;
+    const Y = (v) => y1 - ((v - range.vmin) / range.span) * (y1 - y0);
+    ctxA.strokeStyle = ACC_LANE_COLORS[a];
+    ctxA.lineWidth = 1.4;
+    ctxA.beginPath();
+    ctxA.moveTo(X(CORE.accT[i0]), Y(arr[i0]));
+    for (let i = i0 + stride; i < i1; i += stride) {
+      ctxA.lineTo(X(CORE.accT[i]), Y(arr[i]));
+    }
+    ctxA.stroke();
+  }
+}
+
+function drawAccelTimeAxis(x0, x1, X) {
+  const pxPerSec = (accCW - ACC_GUTTER) / VIEW.span;
+  const target = 90 / pxPerSec;
+  const mag = Math.pow(10, Math.floor(Math.log10(target)));
+  let step = mag;
+  for (const m of [1, 2, 5, 10]) { if (mag * m >= target) { step = mag * m; break; } }
+  const yA = accH - ACC_AXIS_H;
+  ctxA.strokeStyle = '#222b36';
+  ctxA.beginPath(); ctxA.moveTo(0, yA); ctxA.lineTo(accCW, yA); ctxA.stroke();
+  ctxA.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctxA.fillStyle = '#7d8b99';
+  ctxA.font = '10.5px ui-monospace, Menlo, monospace';
+  ctxA.textBaseline = 'top';
+  const t0 = Math.ceil(x0 / step) * step;
+  for (let t = t0; t <= x1 + step * 0.5; t += step) {
+    const x = Math.round(X(t));
+    if (x < ACC_GUTTER || x > accCW) continue;
+    ctxA.beginPath(); ctxA.moveTo(x, yA); ctxA.lineTo(x, accH); ctxA.stroke();
+    ctxA.fillText(fmtTime(t), x + 3, yA + 2);
+  }
+}
+
+function drawAccelCursors(x0, x1, X) {
+  const inView = (t) => t !== null && t >= x0 && t <= x1;
+  if (inView(VIEW.hoverT)) {
+    const x = Math.round(X(VIEW.hoverT));
+    ctxA.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctxA.setLineDash([2, 3]);
+    ctxA.beginPath(); ctxA.moveTo(x, 0); ctxA.lineTo(x, accH - ACC_AXIS_H); ctxA.stroke();
+    ctxA.setLineDash([]);
+  }
+  if (inView(VIEW.cursorA)) drawAccelCursor('A', VIEW.cursorA, '#4fc3f7', X);
+  if (inView(VIEW.cursorB)) drawAccelCursor('B', VIEW.cursorB, '#ffb74d', X);
+}
+
+function drawAccelCursor(name, t, color, X) {
+  const x = Math.round(X(t));
+  ctxA.strokeStyle = color;
+  ctxA.lineWidth = 1.2;
+  ctxA.beginPath(); ctxA.moveTo(x, 0); ctxA.lineTo(x, accH - ACC_AXIS_H); ctxA.stroke();
+  ctxA.fillStyle = color;
+  ctxA.font = 'bold 10.5px ui-monospace, Menlo, monospace';
+  ctxA.textBaseline = 'bottom';
+  ctxA.fillText(name + ' ' + fmtTime(t), x + 4, 10);
+  ctxA.fillRect(x - 3, 0, 6, 8);
+}
+
+/* Readout in the accel plot: time + the actual X/Y/Z values at the cursor. */
+function updateAccelReadout() {
+  let t = VIEW.hoverT !== null ? VIEW.hoverT : VIEW.cursorA;
+  let s = '';
+  if (t !== null) s = fmtTime(t);
+  if (s && CORE.accT.length) {
+    const i = lowerBound(CORE.accT, t);
+    if (i > 0) {
+      const j = i - 1;
+      s += '  \u00B7  AX ' + CORE.accX[j] + '  AY ' + CORE.accY[j] + '  AZ ' + CORE.accZ[j] + ' mg';
+    }
+  }
+  if (VIEW.cursorA !== null && VIEW.cursorB !== null) {
+    const dt = Math.abs(VIEW.cursorB - VIEW.cursorA);
+    s = '\u0394 ' + fmtTime(dt) + '  \u00B7  f = ' + fmtFreq(1 / dt);
+  }
+  if (els.accReadout) els.accReadout.textContent = s;
+}
+
 function drawGutter() {
   ctx.font = '10.5px ui-monospace, Menlo, monospace';
   ctx.textBaseline = 'middle';
@@ -1250,43 +1510,65 @@ function drawCursor(name, t, color, X) {
 }
 
 /* ---------- interactions ---------- */
+function insideRect(e, r) {
+  return e.clientX >= r.left && e.clientX <= r.right &&
+         e.clientY >= r.top && e.clientY <= r.bottom;
+}
+function timeAt(x, gutter, plotW) {
+  const frac = (x - gutter) / plotW;
+  return VIEW.right - VIEW.span + frac * VIEW.span;
+}
 function canvasPos(e) {
   const r = cv.getBoundingClientRect();
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 function timeAtX(x) {
-  const plotW = cw - GUTTER;
-  const frac = (x - GUTTER) / plotW;
-  return VIEW.right - VIEW.span + frac * VIEW.span;
+  return timeAt(x, GUTTER, cw - GUTTER);
 }
 
-cv.addEventListener('wheel', (e) => {
+/* Zoom around the cursor; works on both the waveform and the accel plot. */
+function zoomAt(e, el, gutter) {
   e.preventDefault();
-  const { x } = canvasPos(e);
-  const plotW = cw - GUTTER;
-  const frac = Math.min(1, Math.max(0, (x - GUTTER) / plotW));
+  const r = el.getBoundingClientRect();
+  const plotW = Math.max(1, r.width - gutter);
+  const x = e.clientX - r.left;
+  const frac = Math.min(1, Math.max(0, (x - gutter) / plotW));
   const k = Math.pow(1.0015, e.deltaY);          // >1 zooms out
   const newSpan = Math.min(120, Math.max(5e-7, VIEW.span * k));
-  const tAt = timeAtX(x);
+  const tAt = timeAt(x, gutter, plotW);
   VIEW.span = newSpan;
   VIEW.right = tAt + (1 - frac) * newSpan;
   UI.dirty = true;
-}, { passive: false });
+}
 
-cv.addEventListener('mousedown', (e) => {
+function dragStart(e, canvas) {
   if (e.button !== 0) return;
-  UI.dragging = { startX: e.clientX, startRight: VIEW.right, moved: false };
-});
+  UI.dragging = { startX: e.clientX, startRight: VIEW.right, moved: false, canvas };
+}
+
+cv.addEventListener('wheel', (e) => zoomAt(e, cv, GUTTER), { passive: false });
+if (els.accWave) els.accWave.addEventListener('wheel', (e) => zoomAt(e, els.accWave, ACC_GUTTER), { passive: false });
+
+cv.addEventListener('mousedown', (e) => dragStart(e, 'main'));
+if (els.accWave) els.accWave.addEventListener('mousedown', (e) => dragStart(e, 'accel'));
 
 window.addEventListener('mousemove', (e) => {
-  const r = cv.getBoundingClientRect();
-  const inCanvas = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-  VIEW.hoverT = inCanvas ? timeAtX(e.clientX - r.left) : null;
+  const rMain = cv.getBoundingClientRect();
+  const rAcc = els.accWave ? els.accWave.getBoundingClientRect() : null;
+  if (insideRect(e, rMain)) {
+    VIEW.hoverT = timeAt(e.clientX - rMain.left, GUTTER, rMain.width - GUTTER);
+  } else if (rAcc && insideRect(e, rAcc)) {
+    VIEW.hoverT = timeAt(e.clientX - rAcc.left, ACC_GUTTER, rAcc.width - ACC_GUTTER);
+  } else {
+    VIEW.hoverT = null;
+  }
   if (UI.dragging) {
+    const gutter = UI.dragging.canvas === 'accel' ? ACC_GUTTER : GUTTER;
+    const plotW = UI.dragging.canvas === 'accel' ? accCW - ACC_GUTTER : cw - GUTTER;
     const dx = e.clientX - UI.dragging.startX;
     if (Math.abs(dx) > 3) UI.dragging.moved = true;
     if (UI.dragging.moved) {
-      VIEW.right = UI.dragging.startRight - (dx / (cw - GUTTER)) * VIEW.span;
+      VIEW.right = UI.dragging.startRight - (dx / plotW) * VIEW.span;
       VIEW.follow = false;
       els.chkFollow.checked = false;
     }
@@ -1297,12 +1579,13 @@ window.addEventListener('mousemove', (e) => {
 window.addEventListener('mouseup', (e) => {
   if (!UI.dragging) return;
   const wasDrag = UI.dragging.moved;
-  const startX = UI.dragging.startX;
   UI.dragging = null;
   if (wasDrag) return;
-  // click = cursor A (or restart), shift+click = cursor B
-  const { x } = canvasPos(e);
-  const t = timeAtX(x);
+  // click = cursor A (or restart), shift+click = cursor B; works on either plot
+  const rMain = cv.getBoundingClientRect();
+  const rAcc = els.accWave ? els.accWave.getBoundingClientRect() : null;
+  let t = timeAt(e.clientX - rMain.left, GUTTER, rMain.width - GUTTER);
+  if (rAcc && insideRect(e, rAcc)) t = timeAt(e.clientX - rAcc.left, ACC_GUTTER, rAcc.width - ACC_GUTTER);
   if (e.shiftKey) {
     VIEW.cursorB = t;
   } else if (VIEW.cursorA === null) {

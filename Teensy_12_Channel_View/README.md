@@ -138,6 +138,12 @@ Once the ADXL355/359 is wired and the firmware is flashed:
 * When ON, three lanes — **AX / AY / AZ**, values in **mg** — appear below the
   12 digital lanes, sharing the exact same time axis (zoom / pan / follow /
   cursors all apply). Hovering shows the accel values at the cursor time.
+* A **larger accelerometer panel** below the waveform plots the same data as
+  three stacked graphs with **real Y-axis values** (labeled ticks in mg, zero
+  line emphasized, autoscaled to the visible window) and its own time axis.
+  It shares the same time base, zoom, pan and A/B cursors as the logic
+  waveform, so you can measure e.g. the exact period of a vibration burst.
+  Hovering shows the time plus AX/AY/AZ values in mg.
 * The traces autoscale to the visible window. The Z axis sits around +1000 mg
   (1 g) when the board is flat.
 * **CSV** merges both domains: accel rows carry the digital state at that
