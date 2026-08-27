@@ -442,22 +442,25 @@ static void runWindow(void) {
             if (!rbHasSpace(256)) break;   // ring nearly full -> drain soon
 
             // Accelerometer FIFO is due for a drain.  The SPI transaction
-            // pauses digital sampling for a fraction of a ms; record it as a
-            // gap and re-establish the channel state afterwards.
+            // pauses digital sampling for a fraction of a ms.  Only report
+            // the pause as a gap when an edge was actually lost (the pin
+            // state changed during the SPI transaction); reporting every
+            // tiny pause as a gap would clear the pulse measurements in the
+            // viewer on every window.
             if (accelOn && (now - lastAccelDrainAbs) >= accDrainPeriod) {
                 accelCollect(now);
                 uint32_t pauseEnd = ARM_DWT_CYCCNT;
                 lastAccelDrainAbs = pauseEnd;
-                if (accPauseCount < ACC_PAUSES_MAX) {
-                    accPauses[accPauseCount].t0 = now;
-                    accPauses[accPauseCount].t1 = pauseEnd;
-                    accPauseCount++;
-                }
                 // Pins may have changed during the pause: re-establish the
                 // state with an S event (not E - the edge time is unknown).
                 uint32_t s2 = readState();
                 if (s2 != last) {
                     last = s2;
+                    if (accPauseCount < ACC_PAUSES_MAX) {
+                        accPauses[accPauseCount].t0 = now;
+                        accPauses[accPauseCount].t1 = pauseEnd;
+                        accPauseCount++;
+                    }
                     if (rbHasSpace(2)) {
                         rb[rbHead & RB_MASK].t = pauseEnd - tBase;
                         rb[rbHead & RB_MASK].s = s2;   // S event
